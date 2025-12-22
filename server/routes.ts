@@ -333,6 +333,7 @@ export async function registerRoutes(
               { name: "screenPageViews" },
               { name: "averageSessionDuration" },
               { name: "bounceRate" },
+              { name: "conversions" },
             ],
           },
         })
@@ -346,6 +347,7 @@ export async function registerRoutes(
         pageViews: 0,
         avgSessionDuration: 0,
         bounceRate: 0,
+        conversions: 0,
       };
 
       const byDay = rows.map(row => {
@@ -358,6 +360,7 @@ export async function registerRoutes(
           pageViews: parseInt(metrics[2]?.value || "0", 10),
           avgSessionDuration: parseFloat(metrics[3]?.value || "0"),
           bounceRate: parseFloat(metrics[4]?.value || "0"),
+          conversions: parseInt(metrics[5]?.value || "0", 10),
         };
       });
 
@@ -368,6 +371,7 @@ export async function registerRoutes(
         totals.pageViews = byDay.reduce((sum, day) => sum + day.pageViews, 0);
         totals.avgSessionDuration = byDay.reduce((sum, day) => sum + day.avgSessionDuration, 0) / rows.length;
         totals.bounceRate = byDay.reduce((sum, day) => sum + day.bounceRate, 0) / rows.length;
+        totals.conversions = byDay.reduce((sum, day) => sum + day.conversions, 0);
       }
 
       res.json({ totals, byDay });
@@ -403,6 +407,7 @@ export async function registerRoutes(
               { name: "sessions" },
               { name: "totalUsers" },
               { name: "screenPageViews" },
+              { name: "conversions" },
             ],
             limit: limitNum.toString(),
             orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
@@ -419,6 +424,7 @@ export async function registerRoutes(
           sessions: parseInt(metrics[0]?.value || "0", 10),
           users: parseInt(metrics[1]?.value || "0", 10),
           pageViews: parseInt(metrics[2]?.value || "0", 10),
+          conversions: parseInt(metrics[3]?.value || "0", 10),
         };
       });
 

@@ -1,7 +1,8 @@
 import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 
-const JWT_SECRET = process.env.JWT_SHARED_SECRET || "";
+// Support multiple naming conventions
+const JWT_SECRET = process.env.TRAFFIC_DOCTOR_API_KEY || process.env.JWT_SHARED_SECRET || "";
 
 export interface JWTPayload {
   [key: string]: any;

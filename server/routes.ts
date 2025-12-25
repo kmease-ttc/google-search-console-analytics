@@ -435,5 +435,129 @@ export async function registerRoutes(
     }
   });
 
+  // Combined metrics endpoint - returns all GSC and GA4 metrics in one call
+  app.get("/api/websites/:websiteId/metrics", requireAuth, async (req, res) => {
+    try {
+      const { websiteId } = req.params;
+      const { startDate = "30daysAgo", endDate = "yesterday", queryLimit = "10", pageLimit = "10" } = req.query;
+
+      const connection = await storage.getConnection(websiteId);
+      if (!connection) {
+        return res.status(400).json({ error: "NOT_CONNECTED", message: "No Google connection found for this website" });
+      }
+
+      const oauth2Client = await getAuthenticatedClient(websiteId);
+      const result: any = {
+        gsc_connected: !!connection.scProperty,
+        ga4_connected: !!connection.ga4PropertyId,
+      };
+
+      // Fetch GSC metrics if property is configured
+      if (connection.scProperty) {
+        try {
+          const searchconsole = google.searchconsole({ version: "v1", auth: oauth2Client });
+
+          // Get GSC summary
+          const summaryResponse = await retryWithBackoff(() =>
+            searchconsole.searchanalytics.query({
+              siteUrl: connection.scProperty!,
+              requestBody: {
+                startDate: startDate as string,
+                endDate: endDate as string,
+                dimensions: ["date"],
+              },
+            })
+          );
+
+          const summaryRows = summaryResponse.data.rows || [];
+          result.gsc_impressions = summaryRows.reduce((sum, row) => sum + (row.impressions || 0), 0);
+          result.gsc_clicks = summaryRows.reduce((sum, row) => sum + (row.clicks || 0), 0);
+          result.gsc_ctr = result.gsc_clicks / (result.gsc_impressions || 1);
+          result.gsc_position = summaryRows.length > 0 
+            ? summaryRows.reduce((sum, row) => sum + (row.position || 0), 0) / summaryRows.length 
+            : 0;
+
+          // Get top queries
+          const queriesResponse = await retryWithBackoff(() =>
+            searchconsole.searchanalytics.query({
+              siteUrl: connection.scProperty!,
+              requestBody: {
+                startDate: startDate as string,
+                endDate: endDate as string,
+                dimensions: ["query"],
+                rowLimit: parseInt(queryLimit as string, 10),
+              },
+            })
+          );
+          result.gsc_queries = (queriesResponse.data.rows || []).map(row => ({
+            query: row.keys?.[0] || "",
+            clicks: row.clicks || 0,
+            impressions: row.impressions || 0,
+            ctr: row.ctr || 0,
+            position: row.position || 0,
+          }));
+
+          // Get top pages
+          const pagesResponse = await retryWithBackoff(() =>
+            searchconsole.searchanalytics.query({
+              siteUrl: connection.scProperty!,
+              requestBody: {
+                startDate: startDate as string,
+                endDate: endDate as string,
+                dimensions: ["page"],
+                rowLimit: parseInt(pageLimit as string, 10),
+              },
+            })
+          );
+          result.gsc_pages = (pagesResponse.data.rows || []).map(row => ({
+            page: row.keys?.[0] || "",
+            clicks: row.clicks || 0,
+            impressions: row.impressions || 0,
+            ctr: row.ctr || 0,
+            position: row.position || 0,
+          }));
+        } catch (error: any) {
+          console.error("GSC metrics fetch error:", error);
+          result.gsc_error = handleGoogleAPIError(error);
+        }
+      }
+
+      // Fetch GA4 metrics if property is configured
+      if (connection.ga4PropertyId) {
+        try {
+          const analyticsdata = google.analyticsdata({ version: "v1beta", auth: oauth2Client });
+
+          const ga4Response = await retryWithBackoff(() =>
+            analyticsdata.properties.runReport({
+              property: `properties/${connection.ga4PropertyId}`,
+              requestBody: {
+                dateRanges: [{ startDate: startDate as string, endDate: endDate as string }],
+                metrics: [
+                  { name: "sessions" },
+                  { name: "totalUsers" },
+                  { name: "conversions" },
+                ],
+              },
+            })
+          );
+
+          const ga4Row = ga4Response.data.rows?.[0];
+          const ga4Metrics = ga4Row?.metricValues || [];
+          result.ga4_sessions = parseInt(ga4Metrics[0]?.value || "0", 10);
+          result.ga4_users = parseInt(ga4Metrics[1]?.value || "0", 10);
+          result.ga4_conversions = parseInt(ga4Metrics[2]?.value || "0", 10);
+        } catch (error: any) {
+          console.error("GA4 metrics fetch error:", error);
+          result.ga4_error = handleGoogleAPIError(error);
+        }
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Combined metrics error:", error);
+      res.status(500).json(handleGoogleAPIError(error));
+    }
+  });
+
   return httpServer;
 }

@@ -1,0 +1,161 @@
+Update the **Google Services Worker** to fully comply with the **Gold Standard Worker Blueprint** so it works with Hermes **without changing Bitwarden**.
+
+Bitwarden is fixed and must remain unchanged:
+
+* base_url = [https://worker-google-services--providers2.replit.app/api](https://worker-google-services--providers2.replit.app/api)
+* api_key = (stored in Bitwarden)
+
+Hermes behavior (assume this is already implemented):
+
+* Calls GET {base_url}/health
+* Calls GET {base_url}/smoke-test
+* Sends API key in header (prefer `x-api-key`; support Bearer as fallback if needed)
+* Expects JSON responses always
+
+Your job: modify the worker so those endpoints exist and return JSON as expected.
+
+---
+
+## 1) REQUIRED ROUTES (must exist exactly)
+
+### GET /api/health
+
+Return HTTP 200 JSON:
+{
+"ok": true,
+"service": "google_services_worker",
+"version": "1.0.0",
+"schema_version": "2025-12-25",
+"timestamp": "<iso>",
+"uptime_s": <number>
+}
+
+Rules:
+
+* Must ALWAYS return JSON (never HTML)
+* Must NOT require auth (health should be public)
+
+### GET /api/smoke-test
+
+Return HTTP 200 JSON with the **9 required outputs** (keys must exist even if some values are null):
+{
+"ok": true,
+"service": "google_services_worker",
+"version": "1.0.0",
+"schema_version": "2025-12-25",
+"data": {
+"gsc_impressions": <number|null>,
+"gsc_clicks": <number|null>,
+"gsc_ctr": <number|null>,
+"gsc_position": <number|null>,
+"gsc_queries": <array>,
+"gsc_pages": <array>,
+"ga4_sessions": <number|null>,
+"ga4_users": <number|null>,
+"ga4_conversions": <number|null>
+}
+}
+
+Rules:
+
+* MUST be protected by API key (see Auth section)
+* MUST return JSON on all errors (401/500/etc)
+* If the worker needs inputs (site url, property id), it should use existing env vars already present in the worker (e.g. GOOGLE_SEARCH_CONSOLE_SITE_URL or GSC_SITE, GA4 property id if present). If missing, return ok:false with a JSON error code (don’t 404, don’t HTML).
+
+### OPTIONAL (recommended): GET /api/capabilities
+
+Return JSON describing supported outputs and required env/config:
+{
+"ok": true,
+"service": "google_services_worker",
+"schema_version": "2025-12-25",
+"outputs": ["gsc_impressions","gsc_clicks","gsc_ctr","gsc_position","gsc_queries","gsc_pages","ga4_sessions","ga4_users","ga4_conversions"],
+"auth": { "type": "api_key", "header": "x-api-key" }
+}
+
+---
+
+## 2) AUTH CONTRACT (must match Hermes)
+
+Implement API key middleware:
+
+* Accept either:
+
+  * `x-api-key: <key>`  (preferred)
+  * OR `Authorization: Bearer <key>` (fallback)
+* Compare against the worker secret `TRAFFIC_DOCTOR_API_KEY` (already present in worker secrets)
+* If missing/invalid, return HTTP 401 JSON:
+  {
+  "ok": false,
+  "error": { "code": "unauthorized", "message": "Invalid API key" }
+  }
+
+Do not redirect. Do not return HTML.
+
+---
+
+## 3) JSON-ONLY RULES (critical to avoid doctype)
+
+Guarantee that ALL /api routes return JSON:
+
+* Add a JSON-only 404 handler for /api/*:
+  HTTP 404
+  {
+  "ok": false,
+  "error": { "code": "not_found", "message": "API endpoint not found" }
+  }
+
+* Add a global error handler for /api/* that returns JSON 500:
+  HTTP 500
+  {
+  "ok": false,
+  "error": { "code": "internal", "message": "Internal error" }
+  }
+
+Never serve index.html for /api routes.
+
+---
+
+## 4) IMPLEMENTATION NOTES (so smoke-test never 404s again)
+
+* Ensure the worker’s router actually mounts `/api` prefix.
+  Example (Express):
+  app.use("/api", apiRouter)
+  apiRouter.get("/health", ...)
+  apiRouter.get("/smoke-test", authMiddleware, ...)
+
+* Confirm that `/api/smoke-test` exists EXACTLY (no /api/v1, no /websites/:id requirement).
+  If you want it to call an internal function that currently requires websiteId, provide a default value or read from env vars.
+
+---
+
+## 5) VERIFICATION (do these after deploying)
+
+From a terminal, run:
+
+1. Health (no auth):
+   curl -i [https://worker-google-services--providers2.replit.app/api/health](https://worker-google-services--providers2.replit.app/api/health)
+
+Expected:
+
+* 200
+* Content-Type: application/json
+* Body contains ok:true
+
+2. Smoke-test without key (should be 401 JSON):
+   curl -i [https://worker-google-services--providers2.replit.app/api/smoke-test](https://worker-google-services--providers2.replit.app/api/smoke-test)
+
+Expected:
+
+* 401
+* JSON body with error.code = "unauthorized"
+
+3. Smoke-test with key (should be 200 JSON):
+   curl -i -H "x-api-key: <TRAFFIC_DOCTOR_API_KEY>" [https://worker-google-services--providers2.replit.app/api/smoke-test](https://worker-google-services--providers2.replit.app/api/smoke-test)
+
+Expected:
+
+* 200
+* JSON body with data containing all 9 keys
+
+Once these pass, Hermes smoke test should pass without changing Bitwarden.

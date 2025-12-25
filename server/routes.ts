@@ -624,11 +624,36 @@ export async function registerRoutes(
     });
   });
 
-  // Catch-all for unknown /api/* routes - return JSON 404 (Gold Standard format)
-  app.all("/api/*", (_req, res) => {
+  // Also support POST for smoke-test (recommended)
+  app.post("/api/smoke-test", requireAuth, (_req, res) => {
+    res.json({
+      ok: true,
+      service: "google_services_worker",
+      version: SERVICE_VERSION,
+      schema_version: SCHEMA_VERSION,
+      data: {
+        gsc_impressions: null,
+        gsc_clicks: null,
+        gsc_ctr: null,
+        gsc_position: null,
+        gsc_queries: [],
+        gsc_pages: [],
+        ga4_sessions: null,
+        ga4_users: null,
+        ga4_conversions: null
+      }
+    });
+  });
+
+  // Catch-all for unknown /api/* routes - return JSON 404 with debugging details
+  app.all("/api/*", (req, res) => {
     res.status(404).json({
       ok: false,
-      error: { code: "not_found", message: "API endpoint not found" }
+      error: { 
+        code: "not_found", 
+        message: "API endpoint not found",
+        details: { method: req.method, path: req.path }
+      }
     });
   });
 

@@ -1,0 +1,123 @@
+You’re not crazy — this is actually consistent.
+
+### What your current state means
+
+* **Connection test works** ✅ because Hermes is calling **`{base_url}/health`** and that endpoint exists.
+* **Smoke test fails with 404** ❌ because Hermes is calling **`{base_url}/smoke-test`** and *the worker is responding “endpoint not found”*.
+
+So this is **not** a key issue anymore. It’s **a missing route or a different route prefix**.
+
+Because Bitwarden base_url is:
+
+`https://worker-google-services--providers2.replit.app/api`
+
+Hermes will call:
+
+* Health: `GET https://worker-google-services--providers2.replit.app/api/health` ✅
+* Smoke: `GET https://worker-google-services--providers2.replit.app/api/smoke-test` ❌ (404)
+
+That means the worker you published **does not actually expose `/api/smoke-test` in production**, even if the code has it somewhere.
+
+---
+
+## The exact thing to do next (no guessing)
+
+### 1) Verify the route exists in production, directly
+
+Open a terminal and run these (use the same key you put in Bitwarden):
+
+```bash
+curl -i https://worker-google-services--providers2.replit.app/api/health
+curl -i -H "x-api-key: YOUR_KEY" https://worker-google-services--providers2.replit.app/api/smoke-test
+```
+
+If the second one returns 404, it’s 100% worker routing/deploy.
+
+### 2) Fix the worker to guarantee the endpoint exists
+
+Even if you *think* it exists, the fact that Hermes gets a JSON 404 proves that **the handler isn’t registered on the published build** (wrong file, wrong router mount, build caching, or route is defined under a different prefix like `/api/websites/...`).
+
+Implement this in the Google worker **exactly** (top-level Express app, not only inside another router that might not be mounted):
+
+**Add route aliases too**, so you can’t miss it.
+
+Here’s the prompt for the worker (copy/paste to the Replit agent in the Google worker):
+
+Fix Google Services Worker smoke test 404 by guaranteeing the endpoint exists in production.
+
+The following URLs must work after publish:
+
+* GET  /api/health (200 JSON, no auth)
+* GET  /api/smoke-test (200 JSON with key, 401 JSON without key)
+
+Currently /api/health works but /api/smoke-test returns JSON 404 "API endpoint not found", so the route is not registered in the published server.
+
+Implement /api/smoke-test at the TOP-LEVEL app/router that is definitely mounted in production (not only in a nested router that might not be attached).
+
+Required implementation:
+
+1. Ensure router mount is correct:
+
+* If using apiRouter:
+  app.use("/api", apiRouter)
+  apiRouter.get("/health", ...)
+  apiRouter.get("/smoke-test", requireAuth, ...)
+
+OR if using direct routes:
+app.get("/api/health", ...)
+app.get("/api/smoke-test", requireAuth, ...)
+
+2. Add route aliases to avoid future mismatches:
+
+* app.get("/smoke-test", requireAuth, (req,res)=> res.redirect(307,"/api/smoke-test")) OR directly handle it
+* app.post("/api/smoke-test", requireAuth, same handler) (optional but recommended)
+
+3. Keep responses JSON-only.
+   If /api/smoke-test is hit successfully, return:
+   {
+   "ok": true,
+   "service": "google_services_worker",
+   "data": {
+   "gsc_impressions": null,
+   "gsc_clicks": null,
+   "gsc_ctr": null,
+   "gsc_position": null,
+   "gsc_queries": [],
+   "gsc_pages": [],
+   "ga4_sessions": null,
+   "ga4_users": null,
+   "ga4_conversions": null
+   }
+   }
+
+4. Improve /api 404 handler to help debugging:
+   Return details so we can see what path/method is being hit:
+   {
+   "ok": false,
+   "error": {
+   "code":"not_found",
+   "message":"API endpoint not found",
+   "details": { "method": "<METHOD>", "path": "<PATH>" }
+   }
+   }
+
+5. Publish the worker and confirm:
+   curl -i -H "x-api-key: <key>" [https://worker-google-services--providers2.replit.app/api/smoke-test](https://worker-google-services--providers2.replit.app/api/smoke-test)
+   returns 200 JSON (not 404).
+
+---
+
+## Why it’s still failing even though you “have the route in code”
+
+This happens when:
+
+* the route is defined in a file that isn’t imported on production start
+* the route is behind a feature flag / conditional `if (...)`
+* the router isn’t mounted (`app.use("/api", apiRouter)` missing in the prod entry)
+* you updated dev server but didn’t publish the correct build artifact
+
+That’s why the only truth is: `curl` the published URL.
+
+---
+
+If you run the `curl` above and paste the **status + first line of the response** for `/api/smoke-test`, I can tell you immediately whether it’s a route registration issue or a base_url prefix issue.

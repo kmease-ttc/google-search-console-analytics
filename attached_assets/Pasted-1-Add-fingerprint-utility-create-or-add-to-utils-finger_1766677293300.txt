@@ -1,0 +1,80 @@
+1. Add fingerprint utility (create or add to utils/fingerprint.ts):
+
+import { createHash } from 'crypto';
+export function computeKeyFingerprint(apiKey: string): string {
+  const hash = createHash('sha256').update(apiKey).digest('hex');
+  return `${hash.slice(0, 6)}…${hash.slice(-6)}`;
+}
+2. Update your /api/health endpoint (no auth required):
+
+import { computeKeyFingerprint } from './utils/fingerprint';
+app.get('/api/health', (req, res) => {
+  const expectedKey = process.env.TRAFFIC_DOCTOR_API_KEY || process.env.WORKER_API_KEY || '';
+  const expectedKeyFingerprint = expectedKey ? computeKeyFingerprint(expectedKey) : null;
+  
+  res.json({
+    ok: true,
+    service: 'google_services_worker',
+    version: '1.0.0',
+    schema_version: '2025-12-25',
+    expected_key_fingerprint: expectedKeyFingerprint,
+  });
+});
+3. Update auth middleware to accept BOTH headers:
+
+import { computeKeyFingerprint } from './utils/fingerprint';
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const expectedKey = process.env.TRAFFIC_DOCTOR_API_KEY || process.env.WORKER_API_KEY;
+  
+  if (!expectedKey) {
+    return res.status(500).json({
+      ok: false,
+      error: { code: 'server_error', message: 'API key not configured on worker' }
+    });
+  }
+  
+  // Accept either x-api-key OR Authorization: Bearer
+  const apiKey = req.headers['x-api-key'] as string
+    || (req.headers['authorization']?.replace('Bearer ', '') as string);
+  
+  if (!apiKey) {
+    return res.status(401).json({
+      ok: false,
+      error: { code: 'unauthorized', message: 'API key required' }
+    });
+  }
+  
+  if (apiKey !== expectedKey) {
+    return res.status(401).json({
+      ok: false,
+      error: { code: 'unauthorized', message: 'Invalid API key' }
+    });
+  }
+  
+  next();
+}
+4. Ensure all /api routes return JSON only (add error handler):
+
+// At the end of your Express app setup
+app.use('/api', (err: any, req: Request, res: Response, next: NextFunction) => {
+  res.status(err.status || 500).json({
+    ok: false,
+    error: {
+      code: err.code || 'server_error',
+      message: err.message || 'Internal server error'
+    }
+  });
+});
+// 404 handler for /api routes
+app.use('/api/*', (req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: { code: 'not_found', message: 'Endpoint not found' }
+  });
+});
+Verification: After applying these changes:
+
+Run smoke test in Hermes for Google Data Connector
+Check diagnostics - you should see both hermes_key_fingerprint and worker_expected_fingerprint
+If fingerprints match, auth should succeed
+If they differ, update either Bitwarden's api_key or the worker's TRAFFIC_DOCTOR_API_KEY to align

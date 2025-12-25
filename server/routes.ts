@@ -3,6 +3,7 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { requireAuth, signJWT, verifyJWT } from "./lib/auth";
 import { createOAuth2Client, REQUIRED_SCOPES, getAuthenticatedClient, handleGoogleAPIError, retryWithBackoff } from "./lib/google";
+import { computeKeyFingerprint } from "./utils/fingerprint";
 import { google } from "googleapis";
 import { z } from "zod";
 
@@ -17,14 +18,20 @@ export async function registerRoutes(
 ): Promise<Server> {
   
   // Health check endpoints (both for compatibility) - NO AUTH REQUIRED
-  const healthResponse = () => ({
-    ok: true,
-    service: "google_services_worker",
-    version: SERVICE_VERSION,
-    schema_version: SCHEMA_VERSION,
-    timestamp: new Date().toISOString(),
-    uptime_s: Math.floor((Date.now() - startTime) / 1000)
-  });
+  const healthResponse = () => {
+    const expectedKey = process.env.TRAFFIC_DOCTOR_API_KEY || process.env.WORKER_API_KEY || '';
+    const expectedKeyFingerprint = expectedKey ? computeKeyFingerprint(expectedKey) : null;
+    
+    return {
+      ok: true,
+      service: "google_services_worker",
+      version: SERVICE_VERSION,
+      schema_version: SCHEMA_VERSION,
+      timestamp: new Date().toISOString(),
+      uptime_s: Math.floor((Date.now() - startTime) / 1000),
+      expected_key_fingerprint: expectedKeyFingerprint
+    };
+  };
   
   app.get("/health", (_req, res) => {
     res.json(healthResponse());

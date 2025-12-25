@@ -23,10 +23,22 @@ export function signJWT(payload: JWTPayload): string {
 }
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  // Support both Authorization: Bearer and x-api-key header
   const authHeader = req.headers.authorization;
+  const apiKey = req.headers["x-api-key"] as string | undefined;
   
+  // Check x-api-key first (simple key comparison)
+  if (apiKey) {
+    if (apiKey === JWT_SECRET) {
+      req.user = { authenticated: true, method: "api-key" };
+      return next();
+    }
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  
+  // Fall back to Bearer token (JWT verification)
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "UNAUTHORIZED", message: "Missing or invalid Authorization header" });
+    return res.status(401).json({ error: "unauthorized" });
   }
 
   const token = authHeader.substring(7);
@@ -35,7 +47,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     req.user = verifyJWT(token);
     next();
   } catch (error) {
-    return res.status(401).json({ error: "UNAUTHORIZED", message: "Invalid or expired token" });
+    return res.status(401).json({ error: "unauthorized" });
   }
 }
 

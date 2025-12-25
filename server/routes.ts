@@ -13,9 +13,13 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   
-  // Health check endpoint
+  // Health check endpoints (both for compatibility)
   app.get("/health", (_req, res) => {
-    res.json({ status: "healthy", service: "ai-doctor-google-connector" });
+    res.json({ ok: true, service: "google_services_worker" });
+  });
+  
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true, service: "google_services_worker" });
   });
 
   // OAuth flow - Start
@@ -557,6 +561,148 @@ export async function registerRoutes(
       console.error("Combined metrics error:", error);
       res.status(500).json(handleGoogleAPIError(error));
     }
+  });
+
+  // Smoke test endpoint - returns all 9 metrics structure (for validation)
+  app.get("/api/smoke-test", requireAuth, async (req, res) => {
+    try {
+      const { websiteId, startDate = "30daysAgo", endDate = "yesterday" } = req.query;
+
+      if (!websiteId || typeof websiteId !== "string") {
+        return res.status(400).json({ 
+          error: "BAD_REQUEST", 
+          message: "websiteId query parameter is required" 
+        });
+      }
+
+      const connection = await storage.getConnection(websiteId);
+      if (!connection) {
+        return res.status(400).json({ error: "NOT_CONNECTED", message: "No Google connection found for this website" });
+      }
+
+      const oauth2Client = await getAuthenticatedClient(websiteId);
+      const result: Record<string, any> = {};
+
+      // Fetch GSC metrics if property is configured
+      if (connection.scProperty) {
+        try {
+          const searchconsole = google.searchconsole({ version: "v1", auth: oauth2Client });
+
+          const summaryResponse = await retryWithBackoff(() =>
+            searchconsole.searchanalytics.query({
+              siteUrl: connection.scProperty!,
+              requestBody: {
+                startDate: startDate as string,
+                endDate: endDate as string,
+                dimensions: ["date"],
+              },
+            })
+          );
+
+          const summaryRows = summaryResponse.data.rows || [];
+          result.gsc_impressions = summaryRows.reduce((sum, row) => sum + (row.impressions || 0), 0);
+          result.gsc_clicks = summaryRows.reduce((sum, row) => sum + (row.clicks || 0), 0);
+          result.gsc_ctr = result.gsc_clicks / (result.gsc_impressions || 1);
+          result.gsc_position = summaryRows.length > 0 
+            ? summaryRows.reduce((sum, row) => sum + (row.position || 0), 0) / summaryRows.length 
+            : 0;
+
+          // Get top queries
+          const queriesResponse = await retryWithBackoff(() =>
+            searchconsole.searchanalytics.query({
+              siteUrl: connection.scProperty!,
+              requestBody: {
+                startDate: startDate as string,
+                endDate: endDate as string,
+                dimensions: ["query"],
+                rowLimit: 10,
+              },
+            })
+          );
+          result.gsc_queries = (queriesResponse.data.rows || []).map(row => ({
+            query: row.keys?.[0] || "",
+            clicks: row.clicks || 0,
+            impressions: row.impressions || 0,
+            ctr: row.ctr || 0,
+            position: row.position || 0,
+          }));
+
+          // Get top pages
+          const pagesResponse = await retryWithBackoff(() =>
+            searchconsole.searchanalytics.query({
+              siteUrl: connection.scProperty!,
+              requestBody: {
+                startDate: startDate as string,
+                endDate: endDate as string,
+                dimensions: ["page"],
+                rowLimit: 10,
+              },
+            })
+          );
+          result.gsc_pages = (pagesResponse.data.rows || []).map(row => ({
+            page: row.keys?.[0] || "",
+            clicks: row.clicks || 0,
+            impressions: row.impressions || 0,
+            ctr: row.ctr || 0,
+            position: row.position || 0,
+          }));
+        } catch (error: any) {
+          console.error("Smoke test GSC error:", error);
+          result.gsc_error = handleGoogleAPIError(error);
+        }
+      } else {
+        result.gsc_impressions = null;
+        result.gsc_clicks = null;
+        result.gsc_ctr = null;
+        result.gsc_position = null;
+        result.gsc_queries = null;
+        result.gsc_pages = null;
+      }
+
+      // Fetch GA4 metrics if property is configured
+      if (connection.ga4PropertyId) {
+        try {
+          const analyticsdata = google.analyticsdata({ version: "v1beta", auth: oauth2Client });
+
+          const ga4Response = await retryWithBackoff(() =>
+            analyticsdata.properties.runReport({
+              property: `properties/${connection.ga4PropertyId}`,
+              requestBody: {
+                dateRanges: [{ startDate: startDate as string, endDate: endDate as string }],
+                metrics: [
+                  { name: "sessions" },
+                  { name: "totalUsers" },
+                  { name: "conversions" },
+                ],
+              },
+            })
+          );
+
+          const ga4Row = ga4Response.data.rows?.[0];
+          const ga4Metrics = ga4Row?.metricValues || [];
+          result.ga4_sessions = parseInt(ga4Metrics[0]?.value || "0", 10);
+          result.ga4_users = parseInt(ga4Metrics[1]?.value || "0", 10);
+          result.ga4_conversions = parseInt(ga4Metrics[2]?.value || "0", 10);
+        } catch (error: any) {
+          console.error("Smoke test GA4 error:", error);
+          result.ga4_error = handleGoogleAPIError(error);
+        }
+      } else {
+        result.ga4_sessions = null;
+        result.ga4_users = null;
+        result.ga4_conversions = null;
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Smoke test error:", error);
+      res.status(500).json(handleGoogleAPIError(error));
+    }
+  });
+
+  // Catch-all for unknown /api/* routes - return JSON 404
+  app.all("/api/*", (_req, res) => {
+    res.status(404).json({ error: "not_found", message: "API endpoint not found" });
   });
 
   return httpServer;
